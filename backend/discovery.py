@@ -8,23 +8,44 @@ from zoneinfo import ZoneInfo
 from curl_cffi import requests
 from fastapi import APIRouter, Query
 
-SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+SOFASCORE_BASES = (
+    "https://api.sofascore.com/api/v1",
+    "https://api.sofascore.app/api/v1",
+    "https://www.sofascore.com/api/v1",
+)
 TICKET_TZ = ZoneInfo("America/Cuiaba")
 
 router = APIRouter(prefix="/discover", tags=["discover"])
 
 
 def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
-    response = requests.get(
-        f"{SOFASCORE_BASE}{path}",
-        impersonate="chrome",
-        timeout=15,
-        headers={"Accept": "application/json"},
-    )
-    if allow_404 and response.status_code == 404:
-        return {}
-    response.raise_for_status()
-    return response.json()
+    last_error: Exception | None = None
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://www.sofascore.com/",
+        "Origin": "https://www.sofascore.com",
+    }
+    for base in SOFASCORE_BASES:
+        try:
+            response = requests.get(
+                f"{base}{path}",
+                impersonate="chrome",
+                timeout=15,
+                headers=headers,
+            )
+            if allow_404 and response.status_code == 404:
+                return {}
+            if response.status_code in {403, 429, 503}:
+                last_error = RuntimeError(f"Sofascore bloqueou {base} com HTTP {response.status_code}")
+                continue
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return {}
 
 
 def scheduled_events(date: str) -> list[dict[str, Any]]:
@@ -76,17 +97,14 @@ def search_entities(query: str, limit: int) -> list[dict[str, Any]]:
     payload = api_get(f"/search/all?q={quote(query)}&page=0", allow_404=True)
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
-
     for result in payload.get("results", []):
         entity = result.get("entity") or {}
         sport = entity.get("sport") or {}
         if sport.get("slug") != "football":
             continue
-
         result_type = str(result.get("type") or "")
         if result_type not in {"team", "uniqueTournament", "tournament"}:
             continue
-
         entity_id = entity.get("id")
         if entity_id is None:
             continue
@@ -95,19 +113,16 @@ def search_entities(query: str, limit: int) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-
         category = entity.get("category") or {}
         name = entity.get("name") or ""
-        items.append(
-            {
-                "type": kind,
-                "id": int(entity_id),
-                "name": name,
-                "country": category.get("name") or (entity.get("country") or {}).get("name"),
-                "slug": entity.get("slug"),
-                "variant": team_variant(name) if kind == "team" else "Liga",
-            }
-        )
+        items.append({
+            "type": kind,
+            "id": int(entity_id),
+            "name": name,
+            "country": category.get("name") or (entity.get("country") or {}).get("name"),
+            "slug": entity.get("slug"),
+            "variant": team_variant(name) if kind == "team" else "Liga",
+        })
         if len(items) >= limit:
             break
     return items
@@ -125,10 +140,7 @@ def team_upcoming(team_id: int, pages: int = 3) -> list[dict[str, Any]]:
 
 
 @router.get("/search")
-def autocomplete(
-    q: str = Query(min_length=2, max_length=80),
-    limit: int = Query(default=10, ge=1, le=20),
-) -> dict[str, Any]:
+def autocomplete(q: str = Query(min_length=2, max_length=80), limit: int = Query(default=10, ge=1, le=20)) -> dict[str, Any]:
     return {"query": q, "results": search_entities(q, limit)}
 
 
@@ -143,7 +155,6 @@ def upcoming(
     events: dict[int, dict[str, Any]] = {}
     source = "global-schedule"
     query = (q or "").strip()
-
     if team_id:
         source = "exact-team"
         for event in team_upcoming(team_id):
@@ -171,28 +182,10 @@ def upcoming(
             event_id = event.get("id")
             if event_id is not None:
                 events[int(event_id)] = event
-
     items = [event_to_item(event) for event in events.values()]
-
     if query and not team_id:
         needle = query.lower()
-        items = [
-            item for item in items
-            if needle in str(item.get("home") or "").lower()
-            or needle in str(item.get("away") or "").lower()
-            or needle in str(item.get("league") or "").lower()
-            or needle in str(item.get("country") or "").lower()
-        ]
-
+        items = [item for item in items if needle in str(item.get("home") or "").lower() or needle in str(item.get("away") or "").lower() or needle in str(item.get("league") or "").lower() or needle in str(item.get("country") or "").lower()]
     items.sort(key=lambda item: item.get("startTimestamp") or 0)
     items = items[:limit]
-    return {
-        "date": selected_date,
-        "query": query,
-        "teamId": team_id,
-        "count": len(items),
-        "limit": limit,
-        "scope": "all Sofascore football leagues",
-        "source": source,
-        "events": items,
-    }
+    return {"date": selected_date, "query": query, "teamId": team_id, "count": len(items), "limit": limit, "scope": "all Sofascore football leagues", "source": source, "events": items}
