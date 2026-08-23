@@ -7,6 +7,7 @@
   <title>LiveScore Monitor</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="editor.css" />
+  <link rel="stylesheet" href="discover.css" />
 </head>
 <body>
   <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
@@ -40,6 +41,6 @@
   <template id="conditionEditorTemplate"><div class="condition-edit-row"><select class="condition-type"><option value="goals_over">Mais de gols</option><option value="corners_over">Mais de escanteios</option><option value="reds_under">Menos de cartões vermelhos</option><option value="winner">Vencedor da partida</option></select><input class="condition-value" type="number" step="0.5" value="1.5" /><input class="condition-team" placeholder="Time vencedor" hidden /><button class="remove-condition danger-text" type="button">×</button></div></template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="config.js"></script><script src="app.js" defer></script><script src="ocr-parser-v2.js" defer></script>
+  <script src="config.js"></script><script src="app.js" defer></script><script src="ocr-parser-v2.js" defer></script><script src="discover.js" defer></script>
 </body>
 </html>
