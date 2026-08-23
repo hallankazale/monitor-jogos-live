@@ -57,6 +57,21 @@ def event_to_item(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def team_variant(name: str) -> str:
+    lower = f" {name.lower()} "
+    if any(token in lower for token in (" u20 ", " sub-20 ", " sub 20 ")):
+        return "Sub-20"
+    if any(token in lower for token in (" u23 ", " sub-23 ", " sub 23 ")):
+        return "Sub-23"
+    if any(token in lower for token in (" u17 ", " sub-17 ", " sub 17 ")):
+        return "Sub-17"
+    if any(token in lower for token in (" women ", " feminino ", " feminina ")):
+        return "Feminino"
+    if any(token in lower for token in (" reserves ", " reserva ")) or name.endswith(" B"):
+        return "Reserva/B"
+    return "Principal"
+
+
 def search_entities(query: str, limit: int) -> list[dict[str, Any]]:
     payload = api_get(f"/search/all?q={quote(query)}&page=0", allow_404=True)
     items: list[dict[str, Any]] = []
@@ -82,13 +97,15 @@ def search_entities(query: str, limit: int) -> list[dict[str, Any]]:
         seen.add(key)
 
         category = entity.get("category") or {}
+        name = entity.get("name") or ""
         items.append(
             {
                 "type": kind,
                 "id": int(entity_id),
-                "name": entity.get("name"),
+                "name": name,
                 "country": category.get("name") or (entity.get("country") or {}).get("name"),
                 "slug": entity.get("slug"),
+                "variant": team_variant(name) if kind == "team" else "Liga",
             }
         )
         if len(items) >= limit:
@@ -96,7 +113,7 @@ def search_entities(query: str, limit: int) -> list[dict[str, Any]]:
     return items
 
 
-def team_upcoming(team_id: int, pages: int = 2) -> list[dict[str, Any]]:
+def team_upcoming(team_id: int, pages: int = 3) -> list[dict[str, Any]]:
     events: dict[int, dict[str, Any]] = {}
     for page in range(pages):
         payload = api_get(f"/team/{team_id}/events/next/{page}", allow_404=True)
@@ -119,6 +136,7 @@ def autocomplete(
 def upcoming(
     date: str | None = Query(default=None, description="YYYY-MM-DD"),
     q: str | None = Query(default=None, max_length=80),
+    team_id: int | None = Query(default=None, ge=1),
     limit: int = Query(default=15, ge=1, le=50),
 ) -> dict[str, Any]:
     selected_date = date or datetime.now(TICKET_TZ).strftime("%Y-%m-%d")
@@ -126,13 +144,19 @@ def upcoming(
     source = "global-schedule"
     query = (q or "").strip()
 
-    if query:
+    if team_id:
+        source = "exact-team"
+        for event in team_upcoming(team_id):
+            event_id = event.get("id")
+            if event_id is not None:
+                events[int(event_id)] = event
+    elif query:
         entities = search_entities(query, 10)
         team_ids = [item["id"] for item in entities if item["type"] == "team"][:5]
         if team_ids:
             source = "team-search"
-            for team_id in team_ids:
-                for event in team_upcoming(team_id):
+            for selected_team_id in team_ids:
+                for event in team_upcoming(selected_team_id):
                     event_id = event.get("id")
                     if event_id is not None:
                         events[int(event_id)] = event
@@ -150,7 +174,7 @@ def upcoming(
 
     items = [event_to_item(event) for event in events.values()]
 
-    if query:
+    if query and not team_id:
         needle = query.lower()
         items = [
             item for item in items
@@ -165,6 +189,7 @@ def upcoming(
     return {
         "date": selected_date,
         "query": query,
+        "teamId": team_id,
         "count": len(items),
         "limit": limit,
         "scope": "all Sofascore football leagues",
