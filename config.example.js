@@ -1,3 +1,3 @@
-// Copie este arquivo para config.js somente quando o backend estiver publicado.
-// Nunca coloque sua chave da API de futebol aqui.
-window.MONITOR_API_BASE = 'https://SEU-WORKER.workers.dev';
+// Depois de publicar o backend no Render, copie este arquivo para config.js.
+// Exemplo: https://monitor-jogos-live-api.onrender.com
+window.MONITOR_API_BASE = 'https://SEU-BACKEND.onrender.com';
