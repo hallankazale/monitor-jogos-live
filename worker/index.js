@@ -1,7 +1,7 @@
 const TRACKED = [
   ['palmeiras-vasco','Palmeiras','Vasco da Gama'],
   ['man-city','Manchester City','AFC Bournemouth'],
-  ['barcelona','Fiche','Barcelona'],
+  ['barcelona','Elche','Barcelona'],
   ['santos-mirassol','Santos','Mirassol'],
   ['bragantino-gremio','Bragantino','Grêmio'],
   ['chapecoense-sao-paulo','Chapecoense','São Paulo'],
@@ -16,7 +16,7 @@ function cors(origin){
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods':'GET,OPTIONS',
     'Access-Control-Allow-Headers':'Content-Type',
-    'Cache-Control':'no-store',
+    'Cache-Control':'public, max-age=45',
     'Content-Type':'application/json; charset=utf-8'
   };
 }
@@ -49,42 +49,70 @@ function sumStat(statistics,type){
   return found ? total : null;
 }
 
-async function findFixture(home,away,env){
-  const today='2026-08-23';
-  const payload=await apiGet(`/fixtures?date=${today}&timezone=America/Sao_Paulo`,env);
-  return payload.response.find(item=>sameTeam(item.teams?.home?.name,home) && sameTeam(item.teams?.away?.name,away));
+function mapStatus(short){
+  if(['FT','AET','PEN'].includes(short)) return 'FINISHED';
+  if(short==='HT') return 'PAUSED';
+  if(['1H','2H','ET','P','BT'].includes(short)) return 'IN_PLAY';
+  return 'SCHEDULED';
+}
+
+function findFixture(fixtures,home,away){
+  return fixtures.find(item=>sameTeam(item.teams?.home?.name,home) && sameTeam(item.teams?.away?.name,away));
 }
 
 async function hydrateFixture(fixture,env){
-  const id=fixture.fixture.id;
-  const stats=await apiGet(`/fixtures/statistics?fixture=${id}`,env);
+  const status=mapStatus(fixture.fixture.status?.short);
+  let corners=null;
+  let redCards=null;
+
+  // Estatísticas detalhadas custam uma chamada extra. Só consultamos quando o jogo
+  // está ao vivo, no intervalo ou já terminou; jogos futuros usam apenas o placar base.
+  if(status!=='SCHEDULED'){
+    const stats=await apiGet(`/fixtures/statistics?fixture=${fixture.fixture.id}`,env);
+    corners=sumStat(stats.response,'Corner Kicks');
+    redCards=sumStat(stats.response,'Red Cards');
+  }
+
   return {
-    status: fixture.fixture.status?.short==='FT' ? 'FINISHED' : fixture.fixture.status?.short==='HT' ? 'PAUSED' : ['1H','2H','ET','P'].includes(fixture.fixture.status?.short) ? 'IN_PLAY' : 'SCHEDULED',
+    status,
     minute: fixture.fixture.status?.elapsed ?? null,
     homeScore: fixture.goals?.home ?? null,
     awayScore: fixture.goals?.away ?? null,
-    corners: sumStat(stats.response,'Corner Kicks'),
-    redCards: sumStat(stats.response,'Red Cards'),
-    updatedAt: new Date().toISOString()
+    corners,
+    redCards,
+    updatedAt:new Date().toISOString()
   };
 }
 
 export default {
-  async fetch(request,env){
+  async fetch(request,env,ctx){
     const url=new URL(request.url);
-    if(request.method==='OPTIONS') return new Response(null,{headers:cors(request.headers.get('Origin'))});
-    if(url.pathname!=='/matches') return new Response(JSON.stringify({error:'Not found'}),{status:404,headers:cors(request.headers.get('Origin'))});
-    if(!env.API_FOOTBALL_KEY) return new Response(JSON.stringify({error:'API_FOOTBALL_KEY não configurada'}),{status:500,headers:cors(request.headers.get('Origin'))});
+    const origin=request.headers.get('Origin');
+    if(request.method==='OPTIONS') return new Response(null,{headers:cors(origin)});
+    if(url.pathname!=='/matches') return new Response(JSON.stringify({error:'Not found'}),{status:404,headers:cors(origin)});
+    if(!env.API_FOOTBALL_KEY) return new Response(JSON.stringify({error:'API_FOOTBALL_KEY não configurada'}),{status:500,headers:cors(origin)});
+
+    const cache=caches.default;
+    const cacheKey=new Request(`${url.origin}/matches-cache`,request);
+    const cached=await cache.match(cacheKey);
+    if(cached) return cached;
 
     try{
+      const day='2026-08-23';
+      const fixturesPayload=await apiGet(`/fixtures?date=${day}&timezone=America/Sao_Paulo`,env);
+      const fixtures=fixturesPayload.response || [];
       const matches={};
+
       for(const [key,home,away] of TRACKED){
-        const fixture=await findFixture(home,away,env);
+        const fixture=findFixture(fixtures,home,away);
         matches[key]=fixture ? await hydrateFixture(fixture,env) : null;
       }
-      return new Response(JSON.stringify({matches}),{headers:cors(request.headers.get('Origin'))});
+
+      const response=new Response(JSON.stringify({matches}),{headers:cors(origin)});
+      ctx.waitUntil(cache.put(cacheKey,response.clone()));
+      return response;
     }catch(error){
-      return new Response(JSON.stringify({error:error.message}),{status:502,headers:cors(request.headers.get('Origin'))});
+      return new Response(JSON.stringify({error:error.message}),{status:502,headers:cors(origin)});
     }
   }
 };
