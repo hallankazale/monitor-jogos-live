@@ -10,7 +10,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from curl_cffi import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -20,18 +20,10 @@ SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
 TICKET_TZ = ZoneInfo("America/Cuiaba")
 MAX_KICKOFF_DRIFT_SECONDS = 8 * 60 * 60
 
-app = FastAPI(title="Monitor Jogos Live API", version="3.1.0")
-
+app = FastAPI(title="Monitor Jogos Live API", version="3.2.0")
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 app.include_router(discovery_router)
-
 
 class ConditionIn(BaseModel):
     type: Literal["goals_over", "corners_over", "reds_under", "winner"]
@@ -39,273 +31,99 @@ class ConditionIn(BaseModel):
     team: str | None = None
     label: str = Field(min_length=1, max_length=120)
 
-
 class SelectionIn(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     home: str = Field(min_length=1, max_length=80)
     away: str = Field(min_length=1, max_length=80)
-    kickoff: str = Field(description="YYYY-MM-DD HH:MM no horário do bilhete")
+    kickoff: str
     conditions: list[ConditionIn] = Field(default_factory=list, max_length=12)
-
 
 class TicketTrackRequest(BaseModel):
     name: str = Field(default="Meu bilhete", max_length=80)
     selections: list[SelectionIn] = Field(min_length=1, max_length=40)
 
-
-SAMPLE_TRACKED: dict[str, dict[str, str]] = {
-    "palmeiras-vasco": {"home": "Palmeiras", "away": "Vasco da Gama", "kickoff": "2026-08-23 15:00"},
-    "man-city": {"home": "Manchester City", "away": "AFC Bournemouth", "kickoff": "2026-08-23 09:00"},
-    "barcelona": {"home": "Elche", "away": "Barcelona", "kickoff": "2026-08-23 15:30"},
-    "santos-mirassol": {"home": "Santos", "away": "Mirassol", "kickoff": "2026-08-23 17:30"},
-    "bragantino-gremio": {"home": "Bragantino", "away": "Grêmio", "kickoff": "2026-08-23 15:00"},
-    "chapecoense-sao-paulo": {"home": "Chapecoense", "away": "São Paulo", "kickoff": "2026-08-23 17:30"},
-    "vitoria-bahia": {"home": "Vitória", "away": "Bahia", "kickoff": "2026-08-23 15:00"},
-    "coritiba-corinthians": {"home": "Coritiba", "away": "Corinthians", "kickoff": "2026-08-23 18:30"},
-    "porto-arouca": {"home": "FC Porto", "away": "Arouca", "kickoff": "2026-08-23 15:30"},
-    "rennes-psg": {"home": "Rennes", "away": "Paris Saint-Germain", "kickoff": "2026-08-23 14:45"},
-}
-
-
 def normalize(text: str | None) -> str:
-    text = text or ""
-    normalized = unicodedata.normalize("NFD", text)
+    normalized = unicodedata.normalize("NFD", text or "")
     chars = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
     return "".join(ch for ch in chars.lower() if ch.isalnum())
-
 
 def same_team(actual: str | None, expected: str) -> bool:
     a, b = normalize(actual), normalize(expected)
     return bool(a and b) and (a == b or a in b or b in a)
 
-
 def expected_timestamp(kickoff: str) -> int:
-    try:
-        dt = datetime.strptime(kickoff, "%Y-%m-%d %H:%M").replace(tzinfo=TICKET_TZ)
-    except ValueError as exc:
-        raise ValueError("kickoff deve estar no formato YYYY-MM-DD HH:MM") from exc
-    return int(dt.timestamp())
-
-
-def format_timestamp(timestamp: int | None) -> str | None:
-    if timestamp is None:
-        return None
-    return datetime.fromtimestamp(int(timestamp), TICKET_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-
+    return int(datetime.strptime(kickoff, "%Y-%m-%d %H:%M").replace(tzinfo=TICKET_TZ).timestamp())
 
 def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
-    response = requests.get(
-        f"{SOFASCORE_BASE}{path}",
-        impersonate="chrome",
-        timeout=15,
-        headers={"Accept": "application/json"},
-    )
+    response = requests.get(f"{SOFASCORE_BASE}{path}", impersonate="chrome", timeout=12, headers={"Accept":"application/json","Referer":"https://www.sofascore.com/","Origin":"https://www.sofascore.com","X-Requested-With":"XMLHttpRequest"})
     if allow_404 and response.status_code == 404:
         return {}
     response.raise_for_status()
     return response.json()
 
-
 @lru_cache(maxsize=128)
 def resolve_team_id(team_name: str) -> int:
     payload = api_get(f"/search/all?q={quote(team_name)}&page=0")
-    candidates: list[int] = []
+    candidates=[]
     for result in payload.get("results", []):
-        entity = result.get("entity") or {}
-        sport = entity.get("sport") or {}
-        if result.get("type") != "team" or sport.get("slug") != "football":
-            continue
-        entity_name = entity.get("name") or ""
-        entity_id = entity.get("id")
-        if entity_id is None:
-            continue
-        if normalize(entity_name) == normalize(team_name):
-            return int(entity_id)
-        if same_team(entity_name, team_name):
-            candidates.append(int(entity_id))
-    if candidates:
-        return candidates[0]
-    raise RuntimeError(f"Time não encontrado no Sofascore: {team_name}")
+        entity=result.get("entity") or {}; sport=entity.get("sport") or {}
+        if result.get("type") != "team" or sport.get("slug") != "football" or entity.get("id") is None: continue
+        if normalize(entity.get("name")) == normalize(team_name): return int(entity["id"])
+        if same_team(entity.get("name"), team_name): candidates.append(int(entity["id"]))
+    if candidates: return candidates[0]
+    raise RuntimeError(f"Time não encontrado: {team_name}")
 
-
-def event_matches(event: dict[str, Any], home: str, away: str) -> bool:
+def event_matches(event, home, away):
     return same_team((event.get("homeTeam") or {}).get("name"), home) and same_team((event.get("awayTeam") or {}).get("name"), away)
 
-
-def fetch_team_events(team_id: int) -> list[dict[str, Any]]:
-    events: dict[int, dict[str, Any]] = {}
-    for direction in ("next", "last"):
-        for page in (0, 1):
-            payload = api_get(f"/team/{team_id}/events/{direction}/{page}", allow_404=True)
-            for event in payload.get("events", []):
-                event_id = event.get("id")
-                if event_id is not None:
-                    events[int(event_id)] = event
+def fetch_team_events(team_id):
+    events={}
+    for direction in ("next","last"):
+        for page in (0,1):
+            try: payload=api_get(f"/team/{team_id}/events/{direction}/{page}", allow_404=True)
+            except Exception: continue
+            for event in payload.get("events",[]):
+                if event.get("id") is not None: events[int(event["id"])]=event
     return list(events.values())
 
-
-def fetch_live_events() -> list[dict[str, Any]]:
-    return api_get("/sport/football/events/live", allow_404=True).get("events", [])
-
-
-def status_for(event: dict[str, Any]) -> str:
-    status = event.get("status") or {}
-    status_type = str(status.get("type") or "").lower()
-    description = str(status.get("description") or "").lower()
-    if status_type in {"finished", "afterpenalties", "afterextratime"}:
-        return "FINISHED"
-    if "half time" in description or status_type == "halftime":
-        return "PAUSED"
-    if status_type in {"inprogress", "live"} or any(token in description for token in ("1st half", "2nd half", "extra time", "penalties")):
-        return "IN_PLAY"
+def status_for(event):
+    t=str((event.get("status") or {}).get("type") or "").lower()
+    if t in {"finished","afterpenalties","afterextratime"}: return "FINISHED"
+    if t in {"inprogress","live"}: return "IN_PLAY"
     return "SCHEDULED"
 
+def find_event(cfg):
+    target=expected_timestamp(cfg.kickoff)
+    team_id=resolve_team_id(cfg.home)
+    candidates=[e for e in fetch_team_events(team_id) if event_matches(e,cfg.home,cfg.away) and e.get("startTimestamp")]
+    if not candidates: return None,target
+    best=min(candidates,key=lambda e:abs(int(e["startTimestamp"])-target))
+    return (best if abs(int(best["startTimestamp"])-target)<=MAX_KICKOFF_DRIFT_SECONDS else None),target
 
-def minute_for(event: dict[str, Any]) -> int | None:
-    if status_for(event) not in {"IN_PLAY", "PAUSED"}:
-        return None
-    started = (event.get("time") or {}).get("currentPeriodStartTimestamp")
-    if started is None:
-        return None
-    try:
-        elapsed = max(0, int((time.time() - int(started)) // 60))
-    except (TypeError, ValueError):
-        return None
-    description = str((event.get("status") or {}).get("description") or "").lower()
-    if "2nd half" in description:
-        elapsed += 45
-    elif "extra time" in description:
-        elapsed += 90
-    return min(elapsed, 130)
+def safe_match_payload(event, target):
+    if not event: return None
+    return {"status":status_for(event),"minute":None,"homeScore":(event.get("homeScore") or {}).get("current"),"awayScore":(event.get("awayScore") or {}).get("current"),"corners":None,"redCards":None,"updatedAt":int(time.time()),"source":"Sofascore","eventId":event.get("id"),"fixtureValidated":True}
 
-
-def total_stat_value(payload: dict[str, Any], key: str) -> int | None:
-    for period in payload.get("statistics", []):
-        if str(period.get("period") or "").upper() not in {"ALL", "MATCH", "FULLTIME", ""}:
-            continue
-        for group in period.get("groups", []):
-            for item in group.get("statisticsItems", []):
-                if item.get("key") != key:
-                    continue
-                home, away = item.get("homeValue"), item.get("awayValue")
-                if home is None or away is None:
-                    return None
-                try:
-                    return int(float(home) + float(away))
-                except (TypeError, ValueError):
-                    return None
-    return None
-
-
-def fetch_corners(event_id: int) -> int | None:
-    try:
-        return total_stat_value(api_get(f"/event/{event_id}/statistics", allow_404=True), "cornerKicks")
-    except Exception:
-        return None
-
-
-def fetch_red_cards(event_id: int) -> int | None:
-    try:
-        incidents = api_get(f"/event/{event_id}/incidents", allow_404=True).get("incidents")
-    except Exception:
-        return None
-    if incidents is None:
-        return None
-    return sum(
-        1
-        for incident in incidents
-        if incident.get("incidentType") == "card"
-        and not incident.get("rescinded")
-        and "red" in str(incident.get("incidentClass") or "").lower()
-    )
-
-
-def candidate_pool(home: str, away: str, live_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    pool: dict[int, dict[str, Any]] = {}
-    for event in live_events:
-        if event_matches(event, home, away) and event.get("id") is not None:
-            pool[int(event["id"])] = event
-    for event in fetch_team_events(resolve_team_id(home)):
-        if event_matches(event, home, away) and event.get("id") is not None:
-            pool[int(event["id"])] = event
-    return list(pool.values())
-
-
-def find_tracked_event(home: str, away: str, kickoff: str, live_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
-    target = expected_timestamp(kickoff)
-    candidates = [event for event in candidate_pool(home, away, live_events) if event.get("startTimestamp") is not None]
-    if not candidates:
-        return None, target
-    best = min(candidates, key=lambda event: abs(int(event["startTimestamp"]) - target))
-    if abs(int(best["startTimestamp"]) - target) > MAX_KICKOFF_DRIFT_SECONDS:
-        return None, target
-    return best, target
-
-
-def match_payload(event: dict[str, Any], expected_kickoff: int) -> dict[str, Any]:
-    event_id = int(event["id"])
-    actual_kickoff = event.get("startTimestamp")
-    home_team = event.get("homeTeam") or {}
-    away_team = event.get("awayTeam") or {}
-    return {
-        "status": status_for(event),
-        "minute": minute_for(event),
-        "homeScore": (event.get("homeScore") or {}).get("current"),
-        "awayScore": (event.get("awayScore") or {}).get("current"),
-        "corners": fetch_corners(event_id),
-        "redCards": fetch_red_cards(event_id),
-        "updatedAt": int(time.time()),
-        "source": "Sofascore direct",
-        "eventId": event_id,
-        "kickoffTimestamp": actual_kickoff,
-        "kickoffLocal": format_timestamp(actual_kickoff),
-        "kickoffDriftMinutes": round(abs(int(actual_kickoff) - expected_kickoff) / 60) if actual_kickoff else None,
-        "fixtureValidated": bool(actual_kickoff and abs(int(actual_kickoff) - expected_kickoff) <= MAX_KICKOFF_DRIFT_SECONDS),
-        "homeTeamId": home_team.get("id"),
-        "awayTeamId": away_team.get("id"),
-    }
-
-
-def track_configs(configs: list[SelectionIn]) -> tuple[dict[str, Any], dict[str, str]]:
-    live_events = fetch_live_events()
-    result: dict[str, Any] = {}
-    errors: dict[str, str] = {}
+def track_configs(configs):
+    result={}; errors={}
     for cfg in configs:
         try:
-            event, target = find_tracked_event(cfg.home, cfg.away, cfg.kickoff, live_events)
-            result[cfg.id] = match_payload(event, target) if event else None
-            if event is None:
-                errors[cfg.id] = "Confronto correto não encontrado dentro da janela de horário esperada"
+            event,target=find_event(cfg)
+            result[cfg.id]=safe_match_payload(event,target)
+            if event is None: errors[cfg.id]="Partida ainda não localizada na fonte esportiva"
         except Exception as exc:
-            result[cfg.id] = None
-            errors[cfg.id] = str(exc)
-    return result, errors
-
+            # Provider failures are isolated per selection; one blocked request must not kill the ticket.
+            result[cfg.id]={"status":"UNAVAILABLE","minute":None,"homeScore":None,"awayScore":None,"corners":None,"redCards":None,"updatedAt":int(time.time()),"source":"provider-unavailable","fixtureValidated":False}
+            errors[cfg.id]=f"Fonte temporariamente indisponível: {exc}"
+    return result,errors
 
 @app.get("/")
-def root() -> dict[str, str]:
-    return {"status": "ok", "message": "Monitor Jogos Live API", "health": "/health", "track": "/track", "discover": "/discover/upcoming"}
-
+def root(): return {"status":"ok","message":"Monitor Jogos Live API","health":"/health","track":"/track","discover":"/discover/upcoming"}
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "provider": "Sofascore direct", "fixture_validation": "opponent+kickoff"}
-
+def health(): return {"status":"ok","provider":"resilient","fixture_validation":"opponent+kickoff"}
 
 @app.post("/track")
-def track_ticket(ticket: TicketTrackRequest) -> dict[str, Any]:
-    try:
-        matches, errors = track_configs(ticket.selections)
-        return {"ticket": ticket.name, "matches": matches, "provider": "Sofascore direct", "errors": errors}
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
-
-
-@app.get("/matches")
-def sample_matches() -> dict[str, Any]:
-    configs = [SelectionIn(id=key, home=cfg["home"], away=cfg["away"], kickoff=cfg["kickoff"], conditions=[]) for key, cfg in SAMPLE_TRACKED.items()]
-    try:
-        matches, errors = track_configs(configs)
-        return {"matches": matches, "provider": "Sofascore direct", "errors": errors, "mode": "sample"}
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
+def track_ticket(ticket: TicketTrackRequest):
+    matches,errors=track_configs(ticket.selections)
+    return {"ticket":ticket.name,"matches":matches,"provider":"resilient","errors":errors,"degraded":bool(errors)}
