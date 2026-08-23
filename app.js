@@ -1,4 +1,4 @@
-const API_BASE = window.MONITOR_API_BASE || '';
+const API_BASE = window.MONITOR_API_BASE || 'http://127.0.0.1:8000';
 
 const selections = [
   { id:'palmeiras-vasco', home:'Palmeiras', away:'Vasco da Gama', kickoff:'2026-08-23T15:00:00-03:00', conditions:[
@@ -96,24 +96,33 @@ function statusLabel(match){
 }
 
 function formatKickoff(value){
-  return new Intl.DateTimeFormat('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(value));
+  return new Intl.DateTimeFormat('pt-BR',{hour:'2-digit',minute:'2-digit'}).format(new Date(value));
+}
+
+function initials(name){
+  return name.split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase();
 }
 
 function render(){
   const container = document.querySelector('#games');
   const template = document.querySelector('#gameTemplate');
   container.innerHTML='';
-  let live=0, won=0, risk=0;
+  let live=0, won=0, risk=0, okConditions=0, totalConditions=0;
 
-  for(const selection of selections){
+  selections.forEach((selection, index)=>{
     const match = state.get(selection.id) || normalizeMatch(null, selection);
     const node = template.content.cloneNode(true);
     const status = node.querySelector('.game-status');
     status.textContent = statusLabel(match);
     if(['IN_PLAY','LIVE','PAUSED'].includes(match.status)){ status.classList.add('live'); live++; }
     if(match.status === 'FINISHED') status.classList.add('finished');
-    node.querySelector('.match-title').textContent = `${selection.home} × ${selection.away}`;
-    node.querySelector('.match-time').textContent = `Início: ${formatKickoff(selection.kickoff)}`;
+
+    node.querySelector('.match-time').textContent = formatKickoff(selection.kickoff);
+    node.querySelector('.match-number').textContent = `#${String(index+1).padStart(2,'0')}`;
+    node.querySelector('.home-name').textContent = selection.home;
+    node.querySelector('.away-name').textContent = selection.away;
+    node.querySelector('.home-badge').setAttribute('title', initials(selection.home));
+    node.querySelector('.away-badge').setAttribute('title', initials(selection.away));
     node.querySelector('.home-score').textContent = match.homeScore ?? '-';
     node.querySelector('.away-score').textContent = match.awayScore ?? '-';
     node.querySelector('.goals-stat').textContent = match.homeScore == null ? '-' : (match.homeScore + match.awayScore);
@@ -122,11 +131,15 @@ function render(){
 
     const conditionsBox = node.querySelector('.conditions');
     const results = selection.conditions.map(c => conditionResult(c, match, selection));
+    totalConditions += results.length;
+    okConditions += results.filter(r=>r==='ok').length;
     if(results.some(r=>r==='fail')) risk++;
     else if(match.status === 'FINISHED' && results.every(r=>r==='ok')) won++;
 
-    selection.conditions.forEach((condition,index)=>{
-      const result = results[index];
+    node.querySelector('.condition-count').textContent = `${results.filter(r=>r==='ok').length}/${results.length}`;
+
+    selection.conditions.forEach((condition,indexCondition)=>{
+      const result = results[indexCondition];
       const row = document.createElement('div');
       row.className = `condition ${result}`;
       const text = document.createElement('span');
@@ -138,24 +151,23 @@ function render(){
       conditionsBox.append(row);
     });
     container.append(node);
-  }
+  });
 
   document.querySelector('#liveCount').textContent=live;
   document.querySelector('#wonCount').textContent=won;
   document.querySelector('#riskCount').textContent=risk;
+  const percent = totalConditions ? Math.round((okConditions/totalConditions)*100) : 0;
+  document.querySelector('#progressPercent').textContent=`${percent}%`;
+  document.querySelector('#progressRing').style.setProperty('--progress', percent);
 }
 
 async function refresh(){
   const button=document.querySelector('#refreshButton');
   const notice=document.querySelector('#connectionNotice');
+  const syncText=document.querySelector('#syncText');
   button.disabled=true;
+  syncText.textContent='Atualizando';
   try{
-    if(!API_BASE){
-      notice.hidden=false;
-      notice.textContent='Dashboard instalado. Falta conectar o endpoint seguro da API de futebol para receber os dados em tempo real.';
-      render();
-      return;
-    }
     const response=await fetch(`${API_BASE.replace(/\/$/,'')}/matches`,{cache:'no-store'});
     if(!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload=await response.json();
@@ -163,10 +175,15 @@ async function refresh(){
       state.set(selection.id, normalizeMatch(payload.matches?.[selection.id], selection));
     }
     notice.hidden=true;
+    const now = new Date();
+    document.querySelector('#lastUpdate').textContent = now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+    syncText.textContent='Sincronizado';
     render();
   }catch(error){
     notice.hidden=false;
-    notice.textContent=`Não foi possível atualizar agora: ${error.message}`;
+    notice.textContent=`Não foi possível atualizar os jogos agora. Verifique se o backend está ligado em ${API_BASE}.`;
+    syncText.textContent='Sem conexão';
+    render();
   }finally{
     button.disabled=false;
   }
@@ -175,4 +192,4 @@ async function refresh(){
 document.querySelector('#refreshButton').addEventListener('click',refresh);
 render();
 refresh();
-setInterval(refresh,60000);
+setInterval(refresh,30000);
