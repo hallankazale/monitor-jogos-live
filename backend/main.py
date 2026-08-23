@@ -5,30 +5,52 @@ import time
 import unicodedata
 from datetime import datetime
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from curl_cffi import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
 TICKET_TZ = ZoneInfo("America/Cuiaba")
 MAX_KICKOFF_DRIFT_SECONDS = 8 * 60 * 60
 
-app = FastAPI(title="Monitor Jogos Live API", version="2.2.0")
+app = FastAPI(title="Monitor Jogos Live API", version="3.0.0")
 
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-TRACKED: dict[str, dict[str, str]] = {
+
+class ConditionIn(BaseModel):
+    type: Literal["goals_over", "corners_over", "reds_under", "winner"]
+    value: float | None = None
+    team: str | None = None
+    label: str = Field(min_length=1, max_length=120)
+
+
+class SelectionIn(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    home: str = Field(min_length=1, max_length=80)
+    away: str = Field(min_length=1, max_length=80)
+    kickoff: str = Field(description="YYYY-MM-DD HH:MM no horário do bilhete")
+    conditions: list[ConditionIn] = Field(default_factory=list, max_length=12)
+
+
+class TicketTrackRequest(BaseModel):
+    name: str = Field(default="Meu bilhete", max_length=80)
+    selections: list[SelectionIn] = Field(min_length=1, max_length=40)
+
+
+SAMPLE_TRACKED: dict[str, dict[str, str]] = {
     "palmeiras-vasco": {"home": "Palmeiras", "away": "Vasco da Gama", "kickoff": "2026-08-23 15:00"},
     "man-city": {"home": "Manchester City", "away": "AFC Bournemouth", "kickoff": "2026-08-23 09:00"},
     "barcelona": {"home": "Elche", "away": "Barcelona", "kickoff": "2026-08-23 15:30"},
@@ -55,7 +77,10 @@ def same_team(actual: str | None, expected: str) -> bool:
 
 
 def expected_timestamp(kickoff: str) -> int:
-    dt = datetime.strptime(kickoff, "%Y-%m-%d %H:%M").replace(tzinfo=TICKET_TZ)
+    try:
+        dt = datetime.strptime(kickoff, "%Y-%m-%d %H:%M").replace(tzinfo=TICKET_TZ)
+    except ValueError as exc:
+        raise ValueError("kickoff deve estar no formato YYYY-MM-DD HH:MM") from exc
     return int(dt.timestamp())
 
 
@@ -78,7 +103,7 @@ def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
     return response.json()
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=128)
 def resolve_team_id(team_name: str) -> int:
     payload = api_get(f"/search/all?q={quote(team_name)}&page=0")
     candidates: list[int] = []
@@ -101,9 +126,7 @@ def resolve_team_id(team_name: str) -> int:
 
 
 def event_matches(event: dict[str, Any], home: str, away: str) -> bool:
-    home_name = (event.get("homeTeam") or {}).get("name")
-    away_name = (event.get("awayTeam") or {}).get("name")
-    return same_team(home_name, home) and same_team(away_name, away)
+    return same_team((event.get("homeTeam") or {}).get("name"), home) and same_team((event.get("awayTeam") or {}).get("name"), away)
 
 
 def fetch_team_events(team_id: int) -> list[dict[str, Any]]:
@@ -138,8 +161,7 @@ def status_for(event: dict[str, Any]) -> str:
 def minute_for(event: dict[str, Any]) -> int | None:
     if status_for(event) not in {"IN_PLAY", "PAUSED"}:
         return None
-    time_data = event.get("time") or {}
-    started = time_data.get("currentPeriodStartTimestamp")
+    started = (event.get("time") or {}).get("currentPeriodStartTimestamp")
     if started is None:
         return None
     try:
@@ -156,8 +178,7 @@ def minute_for(event: dict[str, Any]) -> int | None:
 
 def total_stat_value(payload: dict[str, Any], key: str) -> int | None:
     for period in payload.get("statistics", []):
-        period_name = str(period.get("period") or "").upper()
-        if period_name not in {"ALL", "MATCH", "FULLTIME", ""}:
+        if str(period.get("period") or "").upper() not in {"ALL", "MATCH", "FULLTIME", ""}:
             continue
         for group in period.get("groups", []):
             for item in group.get("statisticsItems", []):
@@ -187,13 +208,35 @@ def fetch_red_cards(event_id: int) -> int | None:
         return None
     if incidents is None:
         return None
-    total = 0
-    for incident in incidents:
-        if incident.get("incidentType") != "card" or incident.get("rescinded"):
-            continue
-        if "red" in str(incident.get("incidentClass") or "").lower():
-            total += 1
-    return total
+    return sum(
+        1
+        for incident in incidents
+        if incident.get("incidentType") == "card"
+        and not incident.get("rescinded")
+        and "red" in str(incident.get("incidentClass") or "").lower()
+    )
+
+
+def candidate_pool(home: str, away: str, live_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pool: dict[int, dict[str, Any]] = {}
+    for event in live_events:
+        if event_matches(event, home, away) and event.get("id") is not None:
+            pool[int(event["id"])] = event
+    for event in fetch_team_events(resolve_team_id(home)):
+        if event_matches(event, home, away) and event.get("id") is not None:
+            pool[int(event["id"])] = event
+    return list(pool.values())
+
+
+def find_tracked_event(home: str, away: str, kickoff: str, live_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
+    target = expected_timestamp(kickoff)
+    candidates = [event for event in candidate_pool(home, away, live_events) if event.get("startTimestamp") is not None]
+    if not candidates:
+        return None, target
+    best = min(candidates, key=lambda event: abs(int(event["startTimestamp"]) - target))
+    if abs(int(best["startTimestamp"]) - target) > MAX_KICKOFF_DRIFT_SECONDS:
+        return None, target
+    return best, target
 
 
 def match_payload(event: dict[str, Any], expected_kickoff: int) -> dict[str, Any]:
@@ -220,32 +263,25 @@ def match_payload(event: dict[str, Any], expected_kickoff: int) -> dict[str, Any
     }
 
 
-def candidate_pool(home: str, away: str, live_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    pool: dict[int, dict[str, Any]] = {}
-    for event in live_events:
-        if event_matches(event, home, away) and event.get("id") is not None:
-            pool[int(event["id"])] = event
-    home_id = resolve_team_id(home)
-    for event in fetch_team_events(home_id):
-        if event_matches(event, home, away) and event.get("id") is not None:
-            pool[int(event["id"])] = event
-    return list(pool.values())
-
-
-def find_tracked_event(home: str, away: str, kickoff: str, live_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
-    target = expected_timestamp(kickoff)
-    candidates = [event for event in candidate_pool(home, away, live_events) if event.get("startTimestamp") is not None]
-    if not candidates:
-        return None, target
-    best = min(candidates, key=lambda event: abs(int(event["startTimestamp"]) - target))
-    if abs(int(best["startTimestamp"]) - target) > MAX_KICKOFF_DRIFT_SECONDS:
-        return None, target
-    return best, target
+def track_configs(configs: list[SelectionIn]) -> tuple[dict[str, Any], dict[str, str]]:
+    live_events = fetch_live_events()
+    result: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for cfg in configs:
+        try:
+            event, target = find_tracked_event(cfg.home, cfg.away, cfg.kickoff, live_events)
+            result[cfg.id] = match_payload(event, target) if event else None
+            if event is None:
+                errors[cfg.id] = "Confronto correto não encontrado dentro da janela de horário esperada"
+        except Exception as exc:
+            result[cfg.id] = None
+            errors[cfg.id] = str(exc)
+    return result, errors
 
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"status": "ok", "message": "Monitor Jogos Live API", "health": "/health", "matches": "/matches"}
+    return {"status": "ok", "message": "Monitor Jogos Live API", "health": "/health", "track": "/track"}
 
 
 @app.get("/health")
@@ -253,53 +289,20 @@ def health() -> dict[str, str]:
     return {"status": "ok", "provider": "Sofascore direct", "fixture_validation": "opponent+kickoff"}
 
 
-@app.get("/debug/fixture/{key}")
-def debug_fixture(key: str) -> dict[str, Any]:
-    cfg = TRACKED.get(key)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail="Seleção não encontrada")
-
-    target = expected_timestamp(cfg["kickoff"])
-    live_events = fetch_live_events()
-    candidates = candidate_pool(cfg["home"], cfg["away"], live_events)
-    rows = []
-    for event in candidates:
-        actual = event.get("startTimestamp")
-        rows.append({
-            "eventId": event.get("id"),
-            "home": (event.get("homeTeam") or {}).get("name"),
-            "away": (event.get("awayTeam") or {}).get("name"),
-            "status": status_for(event),
-            "startTimestamp": actual,
-            "startLocal": format_timestamp(actual),
-            "driftMinutes": round(abs(int(actual) - target) / 60) if actual else None,
-        })
-    rows.sort(key=lambda row: row["driftMinutes"] if row["driftMinutes"] is not None else 10**9)
-    return {
-        "key": key,
-        "expected": cfg,
-        "expectedTimestamp": target,
-        "expectedLocal": format_timestamp(target),
-        "maxDriftMinutes": MAX_KICKOFF_DRIFT_SECONDS // 60,
-        "candidates": rows,
-    }
+@app.post("/track")
+def track_ticket(ticket: TicketTrackRequest) -> dict[str, Any]:
+    try:
+        matches, errors = track_configs(ticket.selections)
+        return {"ticket": ticket.name, "matches": matches, "provider": "Sofascore direct", "errors": errors}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
 
 
 @app.get("/matches")
-def matches() -> dict[str, Any]:
+def sample_matches() -> dict[str, Any]:
+    configs = [SelectionIn(id=key, home=cfg["home"], away=cfg["away"], kickoff=cfg["kickoff"], conditions=[]) for key, cfg in SAMPLE_TRACKED.items()]
     try:
-        live_events = fetch_live_events()
-        result: dict[str, Any] = {}
-        errors: dict[str, str] = {}
-        for key, cfg in TRACKED.items():
-            try:
-                event, target = find_tracked_event(cfg["home"], cfg["away"], cfg["kickoff"], live_events)
-                result[key] = match_payload(event, target) if event else None
-                if event is None:
-                    errors[key] = "Confronto correto não encontrado dentro da janela de horário esperada"
-            except Exception as exc:
-                result[key] = None
-                errors[key] = str(exc)
-        return {"matches": result, "provider": "Sofascore direct", "errors": errors}
+        matches, errors = track_configs(configs)
+        return {"matches": matches, "provider": "Sofascore direct", "errors": errors, "mode": "sample"}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
