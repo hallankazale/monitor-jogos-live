@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import os
-import threading
+import time
 import unicodedata
-from datetime import date
+from functools import lru_cache
 from typing import Any
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
-import esd
+from curl_cffi import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Monitor Jogos Live API", version="1.0.1")
+SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 
-allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
+app = FastAPI(title="Monitor Jogos Live API", version="2.0.0")
+
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -20,21 +29,6 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-
-# O EasySoccerData usa a API síncrona do Playwright. Criar o cliente durante
-# a importação do módulo acontece dentro do event loop do Uvicorn e falha.
-# Mantemos um cliente por thread de trabalho, criado apenas quando uma rota
-# síncrona realmente precisar consultar o Sofascore.
-_thread_state = threading.local()
-
-
-def get_client() -> Any:
-    client = getattr(_thread_state, "sofascore_client", None)
-    if client is None:
-        client = esd.SofascoreClient()
-        _thread_state.sofascore_client = client
-    return client
-
 
 TRACKED = {
     "palmeiras-vasco": ("Palmeiras", "Vasco da Gama"),
@@ -53,111 +47,231 @@ TRACKED = {
 def normalize(text: str | None) -> str:
     text = text or ""
     normalized = unicodedata.normalize("NFD", text)
-    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").lower().replace(" ", "").replace("-", "")
+    chars = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return "".join(ch for ch in chars.lower() if ch.isalnum())
 
 
-def same_team(actual: str, expected: str) -> bool:
+def same_team(actual: str | None, expected: str) -> bool:
     a, b = normalize(actual), normalize(expected)
-    return a == b or a in b or b in a
+    return bool(a and b) and (a == b or a in b or b in a)
 
 
-def event_matches(event: Any, home: str, away: str) -> bool:
-    return same_team(event.home_team.name, home) and same_team(event.away_team.name, away)
+def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
+    response = requests.get(
+        f"{SOFASCORE_BASE}{path}",
+        impersonate="chrome",
+        timeout=15,
+        headers={"Accept": "application/json"},
+    )
+    if allow_404 and response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    return response.json()
 
 
-def status_for(event: Any) -> str:
-    description = (getattr(getattr(event, "status", None), "description", "") or "").lower()
-    if any(token in description for token in ("finished", "ended", "after penalties", "full time")):
+@lru_cache(maxsize=64)
+def resolve_team_id(team_name: str) -> int:
+    payload = api_get(f"/search/all?q={quote(team_name)}&page=0")
+    candidates: list[tuple[int, str]] = []
+
+    for result in payload.get("results", []):
+        entity = result.get("entity") or {}
+        sport = entity.get("sport") or {}
+        if result.get("type") != "team" or sport.get("slug") != "football":
+            continue
+        entity_name = entity.get("name") or ""
+        entity_id = entity.get("id")
+        if entity_id is None:
+            continue
+        if normalize(entity_name) == normalize(team_name):
+            return int(entity_id)
+        if same_team(entity_name, team_name):
+            candidates.append((int(entity_id), entity_name))
+
+    if candidates:
+        return candidates[0][0]
+    raise RuntimeError(f"Time não encontrado no Sofascore: {team_name}")
+
+
+def event_matches(event: dict[str, Any], home: str, away: str) -> bool:
+    home_name = (event.get("homeTeam") or {}).get("name")
+    away_name = (event.get("awayTeam") or {}).get("name")
+    return same_team(home_name, home) and same_team(away_name, away)
+
+
+def fetch_team_events(team_id: int) -> list[dict[str, Any]]:
+    events: dict[int, dict[str, Any]] = {}
+    for direction in ("next", "last"):
+        payload = api_get(f"/team/{team_id}/events/{direction}/0", allow_404=True)
+        for event in payload.get("events", []):
+            event_id = event.get("id")
+            if event_id is not None:
+                events[int(event_id)] = event
+    return list(events.values())
+
+
+def fetch_live_events() -> list[dict[str, Any]]:
+    payload = api_get("/sport/football/events/live", allow_404=True)
+    return payload.get("events", [])
+
+
+def status_for(event: dict[str, Any]) -> str:
+    status = event.get("status") or {}
+    status_type = str(status.get("type") or "").lower()
+    description = str(status.get("description") or "").lower()
+
+    if status_type in {"finished", "afterpenalties", "afterextratime"}:
         return "FINISHED"
-    if "half" in description and "time" in description:
+    if "half time" in description or status_type == "halftime":
         return "PAUSED"
-    if any(token in description for token in ("1st half", "2nd half", "extra time", "penalties", "in progress")):
+    if status_type in {"inprogress", "live"} or any(
+        token in description
+        for token in ("1st half", "2nd half", "extra time", "penalties")
+    ):
         return "IN_PLAY"
     return "SCHEDULED"
 
 
-def sum_stat(item: Any) -> int | None:
-    if item is None:
+def minute_for(event: dict[str, Any]) -> int | None:
+    status = status_for(event)
+    if status not in {"IN_PLAY", "PAUSED"}:
         return None
-    home = getattr(item, "home_value", None)
-    away = getattr(item, "away_value", None)
-    if home is None or away is None:
+
+    time_data = event.get("time") or {}
+    started = time_data.get("currentPeriodStartTimestamp")
+    if started is None:
         return None
+
     try:
-        return int(float(home) + float(away))
+        elapsed = max(0, int((time.time() - int(started)) // 60))
     except (TypeError, ValueError):
         return None
 
+    description = str((event.get("status") or {}).get("description") or "").lower()
+    if "2nd half" in description:
+        elapsed += 45
+    elif "extra time" in description:
+        elapsed += 90
+    return min(elapsed, 130)
 
-def count_red_cards(client: Any, event_id: int) -> int | None:
+
+def total_stat_value(payload: dict[str, Any], key: str) -> int | None:
+    for period in payload.get("statistics", []):
+        period_name = str(period.get("period") or "").upper()
+        if period_name not in {"ALL", "MATCH", "FULLTIME", ""}:
+            continue
+        for group in period.get("groups", []):
+            for item in group.get("statisticsItems", []):
+                if item.get("key") != key:
+                    continue
+                home = item.get("homeValue")
+                away = item.get("awayValue")
+                if home is None or away is None:
+                    return None
+                try:
+                    return int(float(home) + float(away))
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
+def fetch_corners(event_id: int) -> int | None:
     try:
-        incidents = client.get_match_incidents(event_id)
+        payload = api_get(f"/event/{event_id}/statistics", allow_404=True)
+        return total_stat_value(payload, "cornerKicks")
     except Exception:
         return None
 
-    count = 0
-    for incident in incidents:
-        incident_type = getattr(getattr(incident, "type", None), "value", getattr(incident, "type", None))
-        if incident_type != "card" or getattr(incident, "rescinded", False):
-            continue
-        details = (getattr(incident, "details", "") or "").lower()
-        if "red" in details:
-            count += 1
-    return count
 
-
-def match_payload(client: Any, event: Any) -> dict[str, Any]:
-    corners = None
+def fetch_red_cards(event_id: int) -> int | None:
     try:
-        details = client.get_match_stats(event.id)
-        if getattr(details, "all", None) is not None:
-            corners = sum_stat(details.all.match_overview.corner_kicks)
+        payload = api_get(f"/event/{event_id}/incidents", allow_404=True)
     except Exception:
-        pass
+        return None
+
+    incidents = payload.get("incidents")
+    if incidents is None:
+        return None
+
+    total = 0
+    for incident in incidents:
+        if incident.get("incidentType") != "card" or incident.get("rescinded"):
+            continue
+        card_class = str(incident.get("incidentClass") or "").lower()
+        if "red" in card_class:
+            total += 1
+    return total
+
+
+def match_payload(event: dict[str, Any]) -> dict[str, Any]:
+    event_id = int(event["id"])
+    home_score = (event.get("homeScore") or {}).get("current")
+    away_score = (event.get("awayScore") or {}).get("current")
 
     return {
         "status": status_for(event),
-        "minute": getattr(event, "total_elapsed_minutes", None),
-        "homeScore": getattr(getattr(event, "home_score", None), "current", None),
-        "awayScore": getattr(getattr(event, "away_score", None), "current", None),
-        "corners": corners,
-        "redCards": count_red_cards(client, event.id),
-        "updatedAt": date.today().isoformat(),
-        "source": "EasySoccerData/Sofascore",
-        "eventId": event.id,
+        "minute": minute_for(event),
+        "homeScore": home_score,
+        "awayScore": away_score,
+        "corners": fetch_corners(event_id),
+        "redCards": fetch_red_cards(event_id),
+        "updatedAt": int(time.time()),
+        "source": "Sofascore direct",
+        "eventId": event_id,
     }
 
 
-def get_today_events(client: Any) -> list[Any]:
-    # A lista do dia mantém jogos encerrados; a lista live melhora a precisão do minuto.
-    scheduled = client.get_events(date.today().isoformat())
-    try:
-        live = client.get_events(live=True)
-    except Exception:
-        live = []
+def find_tracked_event(
+    home: str,
+    away: str,
+    live_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    event = next((item for item in live_events if event_matches(item, home, away)), None)
+    if event:
+        return event
 
-    by_id = {event.id: event for event in scheduled}
-    for event in live:
-        by_id[event.id] = event
-    return list(by_id.values())
+    home_id = resolve_team_id(home)
+    candidates = fetch_team_events(home_id)
+    return next((item for item in candidates if event_matches(item, home, away)), None)
+
+
+@app.get("/")
+def root() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "message": "Monitor Jogos Live API",
+        "health": "/health",
+        "matches": "/matches",
+    }
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "provider": "EasySoccerData/Sofascore"}
+    return {"status": "ok", "provider": "Sofascore direct"}
 
 
 @app.get("/matches")
 def matches() -> dict[str, Any]:
     try:
-        client = get_client()
-        events = get_today_events(client)
+        live_events = fetch_live_events()
+        result: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+
+        for key, (home, away) in TRACKED.items():
+            try:
+                event = find_tracked_event(home, away, live_events)
+                result[key] = match_payload(event) if event else None
+            except Exception as exc:
+                result[key] = None
+                errors[key] = str(exc)
+
+        return {
+            "matches": result,
+            "provider": "Sofascore direct",
+            "errors": errors,
+        }
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
-
-    result: dict[str, Any] = {}
-    for key, (home, away) in TRACKED.items():
-        event = next((item for item in events if event_matches(item, home, away)), None)
-        result[key] = match_payload(client, event) if event else None
-
-    return {"matches": result, "provider": "EasySoccerData/Sofascore"}
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao consultar a fonte esportiva: {exc}",
+        ) from exc
