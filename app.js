@@ -12,7 +12,7 @@ const selections = [
     {type:'corners_over', value:5.5, label:'Mais de 5,5 escanteios'},
     {type:'reds_under', value:1.5, label:'Menos de 1,5 cartões vermelhos'}
   ]},
-  { id:'barcelona', home:'Fiche', away:'Barcelona', kickoff:'2026-08-23T15:30:00-03:00', conditions:[
+  { id:'barcelona', home:'Elche', away:'Barcelona', kickoff:'2026-08-23T15:30:00-03:00', conditions:[
     {type:'winner', team:'Barcelona', label:'Barcelona vence'},
     {type:'goals_over', value:1.5, label:'Mais de 1,5 gols'},
     {type:'corners_over', value:6.5, label:'Mais de 6,5 escanteios'},
@@ -156,7 +156,7 @@ async function refresh(){
       render();
       return;
     }
-    const response=await fetch(`${API_BASE.replace(/\/$/,'')}/matches` , {cache:'no-store'});
+    const response=await fetch(`${API_BASE.replace(/\/$/,'')}/matches`,{cache:'no-store'});
     if(!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload=await response.json();
     for(const selection of selections){
@@ -175,4 +175,4 @@ async function refresh(){
 document.querySelector('#refreshButton').addEventListener('click',refresh);
 render();
 refresh();
-setInterval(refresh,30000);
+setInterval(refresh,60000);
