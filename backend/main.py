@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import unicodedata
 from datetime import date
 from typing import Any
@@ -9,7 +10,7 @@ import esd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Monitor Jogos Live API", version="1.0.0")
+app = FastAPI(title="Monitor Jogos Live API", version="1.0.1")
 
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
@@ -20,7 +21,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = esd.SofascoreClient()
+# O EasySoccerData usa a API síncrona do Playwright. Criar o cliente durante
+# a importação do módulo acontece dentro do event loop do Uvicorn e falha.
+# Mantemos um cliente por thread de trabalho, criado apenas quando uma rota
+# síncrona realmente precisar consultar o Sofascore.
+_thread_state = threading.local()
+
+
+def get_client() -> Any:
+    client = getattr(_thread_state, "sofascore_client", None)
+    if client is None:
+        client = esd.SofascoreClient()
+        _thread_state.sofascore_client = client
+    return client
+
 
 TRACKED = {
     "palmeiras-vasco": ("Palmeiras", "Vasco da Gama"),
@@ -75,7 +89,7 @@ def sum_stat(item: Any) -> int | None:
         return None
 
 
-def count_red_cards(event_id: int) -> int | None:
+def count_red_cards(client: Any, event_id: int) -> int | None:
     try:
         incidents = client.get_match_incidents(event_id)
     except Exception:
@@ -92,7 +106,7 @@ def count_red_cards(event_id: int) -> int | None:
     return count
 
 
-def match_payload(event: Any) -> dict[str, Any]:
+def match_payload(client: Any, event: Any) -> dict[str, Any]:
     corners = None
     try:
         details = client.get_match_stats(event.id)
@@ -107,14 +121,14 @@ def match_payload(event: Any) -> dict[str, Any]:
         "homeScore": getattr(getattr(event, "home_score", None), "current", None),
         "awayScore": getattr(getattr(event, "away_score", None), "current", None),
         "corners": corners,
-        "redCards": count_red_cards(event.id),
+        "redCards": count_red_cards(client, event.id),
         "updatedAt": date.today().isoformat(),
         "source": "EasySoccerData/Sofascore",
         "eventId": event.id,
     }
 
 
-def get_today_events() -> list[Any]:
+def get_today_events(client: Any) -> list[Any]:
     # A lista do dia mantém jogos encerrados; a lista live melhora a precisão do minuto.
     scheduled = client.get_events(date.today().isoformat())
     try:
@@ -136,13 +150,14 @@ def health() -> dict[str, str]:
 @app.get("/matches")
 def matches() -> dict[str, Any]:
     try:
-        events = get_today_events()
+        client = get_client()
+        events = get_today_events(client)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
 
     result: dict[str, Any] = {}
     for key, (home, away) in TRACKED.items():
         event = next((item for item in events if event_matches(item, home, away)), None)
-        result[key] = match_payload(event) if event else None
+        result[key] = match_payload(client, event) if event else None
 
     return {"matches": result, "provider": "EasySoccerData/Sofascore"}
