@@ -17,7 +17,7 @@ SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
 TICKET_TZ = ZoneInfo("America/Cuiaba")
 MAX_KICKOFF_DRIFT_SECONDS = 8 * 60 * 60
 
-app = FastAPI(title="Monitor Jogos Live API", version="2.1.0")
+app = FastAPI(title="Monitor Jogos Live API", version="2.2.0")
 
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
@@ -57,6 +57,12 @@ def same_team(actual: str | None, expected: str) -> bool:
 def expected_timestamp(kickoff: str) -> int:
     dt = datetime.strptime(kickoff, "%Y-%m-%d %H:%M").replace(tzinfo=TICKET_TZ)
     return int(dt.timestamp())
+
+
+def format_timestamp(timestamp: int | None) -> str | None:
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(int(timestamp), TICKET_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
@@ -206,6 +212,7 @@ def match_payload(event: dict[str, Any], expected_kickoff: int) -> dict[str, Any
         "source": "Sofascore direct",
         "eventId": event_id,
         "kickoffTimestamp": actual_kickoff,
+        "kickoffLocal": format_timestamp(actual_kickoff),
         "kickoffDriftMinutes": round(abs(int(actual_kickoff) - expected_kickoff) / 60) if actual_kickoff else None,
         "fixtureValidated": bool(actual_kickoff and abs(int(actual_kickoff) - expected_kickoff) <= MAX_KICKOFF_DRIFT_SECONDS),
         "homeTeamId": home_team.get("id"),
@@ -213,23 +220,23 @@ def match_payload(event: dict[str, Any], expected_kickoff: int) -> dict[str, Any
     }
 
 
-def find_tracked_event(home: str, away: str, kickoff: str, live_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
-    target = expected_timestamp(kickoff)
+def candidate_pool(home: str, away: str, live_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pool: dict[int, dict[str, Any]] = {}
-
     for event in live_events:
         if event_matches(event, home, away) and event.get("id") is not None:
             pool[int(event["id"])] = event
-
     home_id = resolve_team_id(home)
     for event in fetch_team_events(home_id):
         if event_matches(event, home, away) and event.get("id") is not None:
             pool[int(event["id"])] = event
+    return list(pool.values())
 
-    candidates = [event for event in pool.values() if event.get("startTimestamp") is not None]
+
+def find_tracked_event(home: str, away: str, kickoff: str, live_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
+    target = expected_timestamp(kickoff)
+    candidates = [event for event in candidate_pool(home, away, live_events) if event.get("startTimestamp") is not None]
     if not candidates:
         return None, target
-
     best = min(candidates, key=lambda event: abs(int(event["startTimestamp"]) - target))
     if abs(int(best["startTimestamp"]) - target) > MAX_KICKOFF_DRIFT_SECONDS:
         return None, target
@@ -244,6 +251,38 @@ def root() -> dict[str, str]:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "provider": "Sofascore direct", "fixture_validation": "opponent+kickoff"}
+
+
+@app.get("/debug/fixture/{key}")
+def debug_fixture(key: str) -> dict[str, Any]:
+    cfg = TRACKED.get(key)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Seleção não encontrada")
+
+    target = expected_timestamp(cfg["kickoff"])
+    live_events = fetch_live_events()
+    candidates = candidate_pool(cfg["home"], cfg["away"], live_events)
+    rows = []
+    for event in candidates:
+        actual = event.get("startTimestamp")
+        rows.append({
+            "eventId": event.get("id"),
+            "home": (event.get("homeTeam") or {}).get("name"),
+            "away": (event.get("awayTeam") or {}).get("name"),
+            "status": status_for(event),
+            "startTimestamp": actual,
+            "startLocal": format_timestamp(actual),
+            "driftMinutes": round(abs(int(actual) - target) / 60) if actual else None,
+        })
+    rows.sort(key=lambda row: row["driftMinutes"] if row["driftMinutes"] is not None else 10**9)
+    return {
+        "key": key,
+        "expected": cfg,
+        "expectedTimestamp": target,
+        "expectedLocal": format_timestamp(target),
+        "maxDriftMinutes": MAX_KICKOFF_DRIFT_SECONDS // 60,
+        "candidates": rows,
+    }
 
 
 @app.get("/matches")
