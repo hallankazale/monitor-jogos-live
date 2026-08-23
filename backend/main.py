@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import unicodedata
+from datetime import datetime
 from functools import lru_cache
 from typing import Any
 from urllib.parse import quote
@@ -13,15 +14,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
-BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
+TICKET_TZ = ZoneInfo("America/Cuiaba")
+MAX_KICKOFF_DRIFT_SECONDS = 8 * 60 * 60
 
-app = FastAPI(title="Monitor Jogos Live API", version="2.0.0")
+app = FastAPI(title="Monitor Jogos Live API", version="2.1.0")
 
-allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
-    if origin.strip()
-]
+allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -30,17 +28,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TRACKED = {
-    "palmeiras-vasco": ("Palmeiras", "Vasco da Gama"),
-    "man-city": ("Manchester City", "AFC Bournemouth"),
-    "barcelona": ("Elche", "Barcelona"),
-    "santos-mirassol": ("Santos", "Mirassol"),
-    "bragantino-gremio": ("Bragantino", "Grêmio"),
-    "chapecoense-sao-paulo": ("Chapecoense", "São Paulo"),
-    "vitoria-bahia": ("Vitória", "Bahia"),
-    "coritiba-corinthians": ("Coritiba", "Corinthians"),
-    "porto-arouca": ("FC Porto", "Arouca"),
-    "rennes-psg": ("Rennes", "Paris Saint-Germain"),
+TRACKED: dict[str, dict[str, str]] = {
+    "palmeiras-vasco": {"home": "Palmeiras", "away": "Vasco da Gama", "kickoff": "2026-08-23 15:00"},
+    "man-city": {"home": "Manchester City", "away": "AFC Bournemouth", "kickoff": "2026-08-23 09:00"},
+    "barcelona": {"home": "Elche", "away": "Barcelona", "kickoff": "2026-08-23 15:30"},
+    "santos-mirassol": {"home": "Santos", "away": "Mirassol", "kickoff": "2026-08-23 17:30"},
+    "bragantino-gremio": {"home": "Bragantino", "away": "Grêmio", "kickoff": "2026-08-23 15:00"},
+    "chapecoense-sao-paulo": {"home": "Chapecoense", "away": "São Paulo", "kickoff": "2026-08-23 17:30"},
+    "vitoria-bahia": {"home": "Vitória", "away": "Bahia", "kickoff": "2026-08-23 15:00"},
+    "coritiba-corinthians": {"home": "Coritiba", "away": "Corinthians", "kickoff": "2026-08-23 18:30"},
+    "porto-arouca": {"home": "FC Porto", "away": "Arouca", "kickoff": "2026-08-23 15:30"},
+    "rennes-psg": {"home": "Rennes", "away": "Paris Saint-Germain", "kickoff": "2026-08-23 14:45"},
 }
 
 
@@ -54,6 +52,11 @@ def normalize(text: str | None) -> str:
 def same_team(actual: str | None, expected: str) -> bool:
     a, b = normalize(actual), normalize(expected)
     return bool(a and b) and (a == b or a in b or b in a)
+
+
+def expected_timestamp(kickoff: str) -> int:
+    dt = datetime.strptime(kickoff, "%Y-%m-%d %H:%M").replace(tzinfo=TICKET_TZ)
+    return int(dt.timestamp())
 
 
 def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
@@ -72,8 +75,7 @@ def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
 @lru_cache(maxsize=64)
 def resolve_team_id(team_name: str) -> int:
     payload = api_get(f"/search/all?q={quote(team_name)}&page=0")
-    candidates: list[tuple[int, str]] = []
-
+    candidates: list[int] = []
     for result in payload.get("results", []):
         entity = result.get("entity") or {}
         sport = entity.get("sport") or {}
@@ -86,10 +88,9 @@ def resolve_team_id(team_name: str) -> int:
         if normalize(entity_name) == normalize(team_name):
             return int(entity_id)
         if same_team(entity_name, team_name):
-            candidates.append((int(entity_id), entity_name))
-
+            candidates.append(int(entity_id))
     if candidates:
-        return candidates[0][0]
+        return candidates[0]
     raise RuntimeError(f"Time não encontrado no Sofascore: {team_name}")
 
 
@@ -102,51 +103,43 @@ def event_matches(event: dict[str, Any], home: str, away: str) -> bool:
 def fetch_team_events(team_id: int) -> list[dict[str, Any]]:
     events: dict[int, dict[str, Any]] = {}
     for direction in ("next", "last"):
-        payload = api_get(f"/team/{team_id}/events/{direction}/0", allow_404=True)
-        for event in payload.get("events", []):
-            event_id = event.get("id")
-            if event_id is not None:
-                events[int(event_id)] = event
+        for page in (0, 1):
+            payload = api_get(f"/team/{team_id}/events/{direction}/{page}", allow_404=True)
+            for event in payload.get("events", []):
+                event_id = event.get("id")
+                if event_id is not None:
+                    events[int(event_id)] = event
     return list(events.values())
 
 
 def fetch_live_events() -> list[dict[str, Any]]:
-    payload = api_get("/sport/football/events/live", allow_404=True)
-    return payload.get("events", [])
+    return api_get("/sport/football/events/live", allow_404=True).get("events", [])
 
 
 def status_for(event: dict[str, Any]) -> str:
     status = event.get("status") or {}
     status_type = str(status.get("type") or "").lower()
     description = str(status.get("description") or "").lower()
-
     if status_type in {"finished", "afterpenalties", "afterextratime"}:
         return "FINISHED"
     if "half time" in description or status_type == "halftime":
         return "PAUSED"
-    if status_type in {"inprogress", "live"} or any(
-        token in description
-        for token in ("1st half", "2nd half", "extra time", "penalties")
-    ):
+    if status_type in {"inprogress", "live"} or any(token in description for token in ("1st half", "2nd half", "extra time", "penalties")):
         return "IN_PLAY"
     return "SCHEDULED"
 
 
 def minute_for(event: dict[str, Any]) -> int | None:
-    status = status_for(event)
-    if status not in {"IN_PLAY", "PAUSED"}:
+    if status_for(event) not in {"IN_PLAY", "PAUSED"}:
         return None
-
     time_data = event.get("time") or {}
     started = time_data.get("currentPeriodStartTimestamp")
     if started is None:
         return None
-
     try:
         elapsed = max(0, int((time.time() - int(started)) // 60))
     except (TypeError, ValueError):
         return None
-
     description = str((event.get("status") or {}).get("description") or "").lower()
     if "2nd half" in description:
         elapsed += 45
@@ -164,8 +157,7 @@ def total_stat_value(payload: dict[str, Any], key: str) -> int | None:
             for item in group.get("statisticsItems", []):
                 if item.get("key") != key:
                     continue
-                home = item.get("homeValue")
-                away = item.get("awayValue")
+                home, away = item.get("homeValue"), item.get("awayValue")
                 if home is None or away is None:
                     return None
                 try:
@@ -177,77 +169,81 @@ def total_stat_value(payload: dict[str, Any], key: str) -> int | None:
 
 def fetch_corners(event_id: int) -> int | None:
     try:
-        payload = api_get(f"/event/{event_id}/statistics", allow_404=True)
-        return total_stat_value(payload, "cornerKicks")
+        return total_stat_value(api_get(f"/event/{event_id}/statistics", allow_404=True), "cornerKicks")
     except Exception:
         return None
 
 
 def fetch_red_cards(event_id: int) -> int | None:
     try:
-        payload = api_get(f"/event/{event_id}/incidents", allow_404=True)
+        incidents = api_get(f"/event/{event_id}/incidents", allow_404=True).get("incidents")
     except Exception:
         return None
-
-    incidents = payload.get("incidents")
     if incidents is None:
         return None
-
     total = 0
     for incident in incidents:
         if incident.get("incidentType") != "card" or incident.get("rescinded"):
             continue
-        card_class = str(incident.get("incidentClass") or "").lower()
-        if "red" in card_class:
+        if "red" in str(incident.get("incidentClass") or "").lower():
             total += 1
     return total
 
 
-def match_payload(event: dict[str, Any]) -> dict[str, Any]:
+def match_payload(event: dict[str, Any], expected_kickoff: int) -> dict[str, Any]:
     event_id = int(event["id"])
-    home_score = (event.get("homeScore") or {}).get("current")
-    away_score = (event.get("awayScore") or {}).get("current")
-
+    actual_kickoff = event.get("startTimestamp")
+    home_team = event.get("homeTeam") or {}
+    away_team = event.get("awayTeam") or {}
     return {
         "status": status_for(event),
         "minute": minute_for(event),
-        "homeScore": home_score,
-        "awayScore": away_score,
+        "homeScore": (event.get("homeScore") or {}).get("current"),
+        "awayScore": (event.get("awayScore") or {}).get("current"),
         "corners": fetch_corners(event_id),
         "redCards": fetch_red_cards(event_id),
         "updatedAt": int(time.time()),
         "source": "Sofascore direct",
         "eventId": event_id,
+        "kickoffTimestamp": actual_kickoff,
+        "kickoffDriftMinutes": round(abs(int(actual_kickoff) - expected_kickoff) / 60) if actual_kickoff else None,
+        "fixtureValidated": bool(actual_kickoff and abs(int(actual_kickoff) - expected_kickoff) <= MAX_KICKOFF_DRIFT_SECONDS),
+        "homeTeamId": home_team.get("id"),
+        "awayTeamId": away_team.get("id"),
     }
 
 
-def find_tracked_event(
-    home: str,
-    away: str,
-    live_events: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    event = next((item for item in live_events if event_matches(item, home, away)), None)
-    if event:
-        return event
+def find_tracked_event(home: str, away: str, kickoff: str, live_events: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
+    target = expected_timestamp(kickoff)
+    pool: dict[int, dict[str, Any]] = {}
+
+    for event in live_events:
+        if event_matches(event, home, away) and event.get("id") is not None:
+            pool[int(event["id"])] = event
 
     home_id = resolve_team_id(home)
-    candidates = fetch_team_events(home_id)
-    return next((item for item in candidates if event_matches(item, home, away)), None)
+    for event in fetch_team_events(home_id):
+        if event_matches(event, home, away) and event.get("id") is not None:
+            pool[int(event["id"])] = event
+
+    candidates = [event for event in pool.values() if event.get("startTimestamp") is not None]
+    if not candidates:
+        return None, target
+
+    best = min(candidates, key=lambda event: abs(int(event["startTimestamp"]) - target))
+    if abs(int(best["startTimestamp"]) - target) > MAX_KICKOFF_DRIFT_SECONDS:
+        return None, target
+    return best, target
 
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "message": "Monitor Jogos Live API",
-        "health": "/health",
-        "matches": "/matches",
-    }
+    return {"status": "ok", "message": "Monitor Jogos Live API", "health": "/health", "matches": "/matches"}
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "provider": "Sofascore direct"}
+    return {"status": "ok", "provider": "Sofascore direct", "fixture_validation": "opponent+kickoff"}
 
 
 @app.get("/matches")
@@ -256,22 +252,15 @@ def matches() -> dict[str, Any]:
         live_events = fetch_live_events()
         result: dict[str, Any] = {}
         errors: dict[str, str] = {}
-
-        for key, (home, away) in TRACKED.items():
+        for key, cfg in TRACKED.items():
             try:
-                event = find_tracked_event(home, away, live_events)
-                result[key] = match_payload(event) if event else None
+                event, target = find_tracked_event(cfg["home"], cfg["away"], cfg["kickoff"], live_events)
+                result[key] = match_payload(event, target) if event else None
+                if event is None:
+                    errors[key] = "Confronto correto não encontrado dentro da janela de horário esperada"
             except Exception as exc:
                 result[key] = None
                 errors[key] = str(exc)
-
-        return {
-            "matches": result,
-            "provider": "Sofascore direct",
-            "errors": errors,
-        }
+        return {"matches": result, "provider": "Sofascore direct", "errors": errors}
     except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Falha ao consultar a fonte esportiva: {exc}",
-        ) from exc
+        raise HTTPException(status_code=502, detail=f"Falha ao consultar a fonte esportiva: {exc}") from exc
