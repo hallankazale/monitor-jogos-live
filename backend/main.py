@@ -14,11 +14,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .discovery import router as discovery_router
+
 SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
 TICKET_TZ = ZoneInfo("America/Cuiaba")
 MAX_KICKOFF_DRIFT_SECONDS = 8 * 60 * 60
 
-app = FastAPI(title="Monitor Jogos Live API", version="3.0.0")
+app = FastAPI(title="Monitor Jogos Live API", version="3.1.0")
 
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
@@ -28,6 +30,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+app.include_router(discovery_router)
 
 
 class ConditionIn(BaseModel):
@@ -281,7 +284,7 @@ def track_configs(configs: list[SelectionIn]) -> tuple[dict[str, Any], dict[str,
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"status": "ok", "message": "Monitor Jogos Live API", "health": "/health", "track": "/track"}
+    return {"status": "ok", "message": "Monitor Jogos Live API", "health": "/health", "track": "/track", "discover": "/discover/upcoming"}
 
 
 @app.get("/health")
