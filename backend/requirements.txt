@@ -1,3 +1,5 @@
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 EasySoccerData==0.0.8
+playwright==1.62.0
+lxml>=5.0.0,<7.0.0
