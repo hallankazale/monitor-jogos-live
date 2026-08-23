@@ -6,15 +6,6 @@
   <meta name="theme-color" content="#07111f" />
   <title>LiveScore Monitor</title>
   <link rel="stylesheet" href="styles.css" />
-  <style>
-    .team-badge.has-logo{background-color:#f7f9fc;background-size:78%;background-position:center;background-repeat:no-repeat}
-    .team-badge.has-logo:after{display:none}
-    .fixture-validated .card-accent{opacity:.9}
-    .game-card.is-live{box-shadow:0 18px 55px rgba(51,209,122,.08)}
-    .game-card.is-live .card-accent{background:linear-gradient(90deg,transparent,#33d17a,transparent)}
-    .game-card.has-risk .card-accent{background:linear-gradient(90deg,transparent,#ff6674,transparent)}
-    .game-card.all-ok .card-accent{background:linear-gradient(90deg,transparent,#33d17a,transparent)}
-  </style>
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -23,23 +14,32 @@
   <header class="topbar">
     <div class="brand">
       <div class="brand-mark">LM</div>
-      <div>
-        <p class="eyebrow">LIVE MATCH MONITOR</p>
-        <h1>Minha Múltipla</h1>
-      </div>
+      <div><p class="eyebrow">LIVE MATCH MONITOR</p><h1>Meus Bilhetes</h1></div>
     </div>
     <div class="top-actions">
+      <button id="newTicketButton" class="primary-small" type="button">+ Novo bilhete</button>
       <div class="sync-pill"><span class="pulse"></span><span id="syncText">Conectando</span></div>
       <button id="refreshButton" class="icon-button" type="button" aria-label="Atualizar dados">↻</button>
     </div>
   </header>
 
   <main class="container">
+    <section class="ticket-bar">
+      <div>
+        <span class="section-kicker">BILHETE ATIVO</span>
+        <select id="ticketSelect" aria-label="Selecionar bilhete"></select>
+      </div>
+      <div class="ticket-actions">
+        <button id="editTicketButton" class="ghost-button" type="button">Editar</button>
+        <button id="deleteTicketButton" class="ghost-button danger-text" type="button">Excluir</button>
+      </div>
+    </section>
+
     <section class="hero-card">
       <div class="hero-copy">
         <span class="hero-label">ACOMPANHAMENTO EM TEMPO REAL</span>
-        <h2>Seu bilhete, organizado em uma única tela.</h2>
-        <p>Placar, gols, escanteios, cartões e condições atualizados automaticamente.</p>
+        <h2 id="heroTitle">Seu bilhete, organizado em uma única tela.</h2>
+        <p>Cadastre qualquer bilhete e acompanhe placar, gols, escanteios, cartões e condições automaticamente.</p>
       </div>
       <div class="hero-progress">
         <div class="progress-ring" id="progressRing"><strong id="progressPercent">0%</strong><span>concluído</span></div>
@@ -48,44 +48,78 @@
     </section>
 
     <section class="summary-grid" aria-label="Resumo do bilhete">
-      <article class="summary-card"><div class="summary-icon">◆</div><div><small>Seleções</small><strong id="totalSelections">10</strong></div></article>
+      <article class="summary-card"><div class="summary-icon">◆</div><div><small>Jogos</small><strong id="totalSelections">0</strong></div></article>
       <article class="summary-card live-summary"><div class="summary-icon">●</div><div><small>Ao vivo</small><strong id="liveCount">0</strong></div></article>
       <article class="summary-card success-summary"><div class="summary-icon">✓</div><div><small>Confirmadas</small><strong id="wonCount">0</strong></div></article>
       <article class="summary-card danger-summary"><div class="summary-icon">!</div><div><small>Em risco</small><strong id="riskCount">0</strong></div></article>
     </section>
 
     <section class="section-head">
-      <div>
-        <span class="section-kicker">10 SELEÇÕES</span>
-        <h2>Jogos monitorados</h2>
-      </div>
+      <div><span class="section-kicker" id="selectionCountLabel">0 JOGOS</span><h2>Jogos monitorados</h2></div>
       <div class="legend"><span><i class="dot ok-dot"></i> OK</span><span><i class="dot wait-dot"></i> Aguardando</span><span><i class="dot fail-dot"></i> Perdida</span></div>
     </section>
 
     <section id="connectionNotice" class="notice" hidden></section>
+    <section id="emptyState" class="empty-state" hidden>
+      <div class="empty-icon">+</div>
+      <h3>Nenhum jogo neste bilhete</h3>
+      <p>Cadastre os jogos e condições que você apostou para começar o acompanhamento.</p>
+      <button class="primary-button" id="emptyAddButton" type="button">Cadastrar bilhete</button>
+    </section>
     <section id="games" class="games" aria-live="polite"></section>
   </main>
 
   <template id="gameTemplate">
     <article class="game-card">
       <div class="card-accent"></div>
-      <div class="game-head">
-        <div class="game-meta"><span class="game-status">AGENDADO</span><span class="match-time"></span></div>
-        <span class="match-number"></span>
-      </div>
+      <div class="game-head"><div class="game-meta"><span class="game-status">AGENDADO</span><span class="match-time"></span></div><span class="match-number"></span></div>
       <div class="fixture">
         <div class="team team-home"><div class="team-badge home-badge"></div><span class="home-name"></span></div>
         <div class="score"><span class="home-score">-</span><b>:</b><span class="away-score">-</span></div>
         <div class="team team-away"><span class="away-name"></span><div class="team-badge away-badge"></div></div>
       </div>
-      <div class="stats-row">
-        <div><span>Total de gols</span><strong class="goals-stat">-</strong></div>
-        <div><span>Escanteios</span><strong class="corners-stat">-</strong></div>
-        <div><span>Vermelhos</span><strong class="reds-stat">-</strong></div>
-      </div>
+      <div class="stats-row"><div><span>Total de gols</span><strong class="goals-stat">-</strong></div><div><span>Escanteios</span><strong class="corners-stat">-</strong></div><div><span>Vermelhos</span><strong class="reds-stat">-</strong></div></div>
       <div class="conditions-title"><span>Condições do bilhete</span><span class="condition-count"></span></div>
       <div class="conditions"></div>
     </article>
+  </template>
+
+  <dialog id="ticketDialog" class="ticket-dialog">
+    <form id="ticketForm" method="dialog">
+      <div class="dialog-head"><div><span class="section-kicker">GERENCIAR BILHETE</span><h2 id="dialogTitle">Novo bilhete</h2></div><button id="closeDialogButton" class="icon-button" type="button">×</button></div>
+      <label class="field"><span>Nome do bilhete</span><input id="ticketName" maxlength="80" placeholder="Ex.: Múltipla domingo" required /></label>
+      <div class="editor-head"><div><h3>Jogos</h3><p>Adicione cada confronto e as condições apostadas.</p></div><button id="addGameButton" class="ghost-button" type="button">+ Adicionar jogo</button></div>
+      <div id="gameEditor" class="game-editor"></div>
+      <div class="dialog-actions"><button id="cancelDialogButton" class="ghost-button" type="button">Cancelar</button><button class="primary-button" type="submit">Salvar bilhete</button></div>
+    </form>
+  </dialog>
+
+  <template id="gameEditorTemplate">
+    <section class="editor-card">
+      <div class="editor-card-head"><strong class="editor-game-title">Jogo</strong><button class="remove-game danger-text" type="button">Remover</button></div>
+      <div class="editor-grid">
+        <label class="field"><span>Mandante</span><input class="editor-home" placeholder="Palmeiras" required /></label>
+        <label class="field"><span>Visitante</span><input class="editor-away" placeholder="Vasco da Gama" required /></label>
+        <label class="field"><span>Data</span><input class="editor-date" type="date" required /></label>
+        <label class="field"><span>Horário</span><input class="editor-time" type="time" required /></label>
+      </div>
+      <div class="condition-editor-head"><span>Condições</span><button class="add-condition ghost-button" type="button">+ Condição</button></div>
+      <div class="condition-editor"></div>
+    </section>
+  </template>
+
+  <template id="conditionEditorTemplate">
+    <div class="condition-edit-row">
+      <select class="condition-type">
+        <option value="goals_over">Mais de gols</option>
+        <option value="corners_over">Mais de escanteios</option>
+        <option value="reds_under">Menos de cartões vermelhos</option>
+        <option value="winner">Vencedor da partida</option>
+      </select>
+      <input class="condition-value" type="number" step="0.5" value="1.5" />
+      <input class="condition-team" placeholder="Time vencedor" hidden />
+      <button class="remove-condition danger-text" type="button">×</button>
+    </div>
   </template>
 
   <script src="config.js"></script>
