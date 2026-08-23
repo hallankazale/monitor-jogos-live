@@ -27,6 +27,11 @@ def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
     return response.json()
 
 
+def scheduled_events(date: str) -> list[dict[str, Any]]:
+    payload = api_get(f"/sport/football/scheduled-events/{date}", allow_404=True)
+    return payload.get("events", [])
+
+
 def event_to_item(event: dict[str, Any]) -> dict[str, Any]:
     tournament = event.get("tournament") or {}
     unique_tournament = tournament.get("uniqueTournament") or {}
@@ -119,27 +124,34 @@ def upcoming(
     selected_date = date or datetime.now(TICKET_TZ).strftime("%Y-%m-%d")
     events: dict[int, dict[str, Any]] = {}
     source = "global-schedule"
+    query = (q or "").strip()
 
-    if q and q.strip():
-        source = "team-search"
-        entities = search_entities(q.strip(), 8)
+    if query:
+        entities = search_entities(query, 10)
         team_ids = [item["id"] for item in entities if item["type"] == "team"][:5]
-        for team_id in team_ids:
-            for event in team_upcoming(team_id):
+        if team_ids:
+            source = "team-search"
+            for team_id in team_ids:
+                for event in team_upcoming(team_id):
+                    event_id = event.get("id")
+                    if event_id is not None:
+                        events[int(event_id)] = event
+        else:
+            source = "league-filter"
+            for event in scheduled_events(selected_date):
                 event_id = event.get("id")
                 if event_id is not None:
                     events[int(event_id)] = event
     else:
-        payload = api_get(f"/sport/football/scheduled-events/{selected_date}", allow_404=True)
-        for event in payload.get("events", []):
+        for event in scheduled_events(selected_date):
             event_id = event.get("id")
             if event_id is not None:
                 events[int(event_id)] = event
 
     items = [event_to_item(event) for event in events.values()]
 
-    if q and q.strip():
-        needle = q.strip().lower()
+    if query:
+        needle = query.lower()
         items = [
             item for item in items
             if needle in str(item.get("home") or "").lower()
@@ -152,7 +164,7 @@ def upcoming(
     items = items[:limit]
     return {
         "date": selected_date,
-        "query": q or "",
+        "query": query,
         "count": len(items),
         "limit": limit,
         "scope": "all Sofascore football leagues",
