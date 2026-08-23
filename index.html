@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>Monitor de Jogos Live</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MONITOR ESPORTIVO</p>
+      <h1>Jogos ao vivo</h1>
+    </div>
+    <div class="live-badge"><span></span> LIVE</div>
+  </header>
+
+  <main class="container">
+    <section class="summary-grid" aria-label="Resumo">
+      <article class="summary-card"><small>Seleções</small><strong id="totalSelections">10</strong></article>
+      <article class="summary-card"><small>Em andamento</small><strong id="liveCount">0</strong></article>
+      <article class="summary-card"><small>Confirmadas</small><strong id="wonCount">0</strong></article>
+      <article class="summary-card"><small>Em risco</small><strong id="riskCount">0</strong></article>
+    </section>
+
+    <section class="toolbar">
+      <div>
+        <h2>Minha múltipla</h2>
+        <p>Atualização automática de placar, gols, escanteios e cartões.</p>
+      </div>
+      <button id="refreshButton" type="button">Atualizar agora</button>
+    </section>
+
+    <section id="connectionNotice" class="notice" hidden></section>
+    <section id="games" class="games" aria-live="polite"></section>
+  </main>
+
+  <template id="gameTemplate">
+    <article class="game-card">
+      <div class="game-head">
+        <div>
+          <span class="game-status">AGENDADO</span>
+          <h3 class="match-title"></h3>
+          <p class="match-time"></p>
+        </div>
+        <div class="score"><span class="home-score">-</span><b>×</b><span class="away-score">-</span></div>
+      </div>
+      <div class="stats-row">
+        <div><span>Gols</span><strong class="goals-stat">-</strong></div>
+        <div><span>Escanteios</span><strong class="corners-stat">-</strong></div>
+        <div><span>Vermelhos</span><strong class="reds-stat">-</strong></div>
+      </div>
+      <div class="conditions"></div>
+    </article>
+  </template>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
