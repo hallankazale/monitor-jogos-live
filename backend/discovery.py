@@ -17,22 +17,31 @@ TICKET_TZ = ZoneInfo("America/Cuiaba")
 
 router = APIRouter(prefix="/discover", tags=["discover"])
 
+# O Sofascore passou a responder 403/challenge quando o request não se parece
+# com o XHR feito pelo próprio site. Como `requests` é o mesmo módulo importado
+# pelo backend principal, este wrapper também protege as chamadas de main.py.
+_original_get = requests.get
+
+def _xhr_get(url: str, *args: Any, **kwargs: Any):
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers.setdefault("Accept", "application/json, text/plain, */*")
+    headers.setdefault("X-Requested-With", "XMLHttpRequest")
+    headers.setdefault("Referer", "https://www.sofascore.com/")
+    headers.setdefault("Origin", "https://www.sofascore.com")
+    kwargs["headers"] = headers
+    return _original_get(url, *args, **kwargs)
+
+requests.get = _xhr_get
+
 
 def api_get(path: str, *, allow_404: bool = False) -> dict[str, Any]:
     last_error: Exception | None = None
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.sofascore.com/",
-        "Origin": "https://www.sofascore.com",
-    }
     for base in SOFASCORE_BASES:
         try:
             response = requests.get(
                 f"{base}{path}",
                 impersonate="chrome",
                 timeout=15,
-                headers=headers,
             )
             if allow_404 and response.status_code == 404:
                 return {}
