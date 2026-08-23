@@ -3,33 +3,54 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#0b1220" />
-  <title>Monitor de Jogos Live</title>
+  <meta name="theme-color" content="#07111f" />
+  <title>LiveScore Monitor</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
   <header class="topbar">
-    <div>
-      <p class="eyebrow">MONITOR ESPORTIVO</p>
-      <h1>Jogos ao vivo</h1>
+    <div class="brand">
+      <div class="brand-mark">LM</div>
+      <div>
+        <p class="eyebrow">LIVE MATCH MONITOR</p>
+        <h1>Minha Múltipla</h1>
+      </div>
     </div>
-    <div class="live-badge"><span></span> LIVE</div>
+    <div class="top-actions">
+      <div class="sync-pill"><span class="pulse"></span><span id="syncText">Conectando</span></div>
+      <button id="refreshButton" class="icon-button" type="button" aria-label="Atualizar dados">↻</button>
+    </div>
   </header>
 
   <main class="container">
-    <section class="summary-grid" aria-label="Resumo">
-      <article class="summary-card"><small>Seleções</small><strong id="totalSelections">10</strong></article>
-      <article class="summary-card"><small>Em andamento</small><strong id="liveCount">0</strong></article>
-      <article class="summary-card"><small>Confirmadas</small><strong id="wonCount">0</strong></article>
-      <article class="summary-card"><small>Em risco</small><strong id="riskCount">0</strong></article>
+    <section class="hero-card">
+      <div class="hero-copy">
+        <span class="hero-label">ACOMPANHAMENTO EM TEMPO REAL</span>
+        <h2>Seu bilhete, organizado em uma única tela.</h2>
+        <p>Placar, gols, escanteios, cartões e condições atualizados automaticamente.</p>
+      </div>
+      <div class="hero-progress">
+        <div class="progress-ring" id="progressRing"><strong id="progressPercent">0%</strong><span>concluído</span></div>
+        <div><small>Última atualização</small><strong id="lastUpdate">--:--</strong></div>
+      </div>
     </section>
 
-    <section class="toolbar">
+    <section class="summary-grid" aria-label="Resumo do bilhete">
+      <article class="summary-card"><div class="summary-icon">◆</div><div><small>Seleções</small><strong id="totalSelections">10</strong></div></article>
+      <article class="summary-card live-summary"><div class="summary-icon">●</div><div><small>Ao vivo</small><strong id="liveCount">0</strong></div></article>
+      <article class="summary-card success-summary"><div class="summary-icon">✓</div><div><small>Confirmadas</small><strong id="wonCount">0</strong></div></article>
+      <article class="summary-card danger-summary"><div class="summary-icon">!</div><div><small>Em risco</small><strong id="riskCount">0</strong></div></article>
+    </section>
+
+    <section class="section-head">
       <div>
-        <h2>Minha múltipla</h2>
-        <p>Atualização automática de placar, gols, escanteios e cartões.</p>
+        <span class="section-kicker">10 SELEÇÕES</span>
+        <h2>Jogos monitorados</h2>
       </div>
-      <button id="refreshButton" type="button">Atualizar agora</button>
+      <div class="legend"><span><i class="dot ok-dot"></i> OK</span><span><i class="dot wait-dot"></i> Aguardando</span><span><i class="dot fail-dot"></i> Perdida</span></div>
     </section>
 
     <section id="connectionNotice" class="notice" hidden></section>
@@ -38,23 +59,33 @@
 
   <template id="gameTemplate">
     <article class="game-card">
+      <div class="card-accent"></div>
       <div class="game-head">
-        <div>
+        <div class="game-meta">
           <span class="game-status">AGENDADO</span>
-          <h3 class="match-title"></h3>
-          <p class="match-time"></p>
+          <span class="match-time"></span>
         </div>
-        <div class="score"><span class="home-score">-</span><b>×</b><span class="away-score">-</span></div>
+        <span class="match-number"></span>
       </div>
+
+      <div class="fixture">
+        <div class="team team-home"><div class="team-badge home-badge"></div><span class="home-name"></span></div>
+        <div class="score"><span class="home-score">-</span><b>:</b><span class="away-score">-</span></div>
+        <div class="team team-away"><span class="away-name"></span><div class="team-badge away-badge"></div></div>
+      </div>
+
       <div class="stats-row">
-        <div><span>Gols</span><strong class="goals-stat">-</strong></div>
+        <div><span>Total de gols</span><strong class="goals-stat">-</strong></div>
         <div><span>Escanteios</span><strong class="corners-stat">-</strong></div>
         <div><span>Vermelhos</span><strong class="reds-stat">-</strong></div>
       </div>
+
+      <div class="conditions-title"><span>Condições do bilhete</span><span class="condition-count"></span></div>
       <div class="conditions"></div>
     </article>
   </template>
 
+  <script src="config.js"></script>
   <script src="app.js" defer></script>
 </body>
 </html>
