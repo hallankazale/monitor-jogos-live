@@ -1,0 +1,6 @@
+name = "monitor-jogos-live-api"
+main = "index.js"
+compatibility_date = "2026-08-23"
+
+# Configure a chave com:
+# npx wrangler secret put API_FOOTBALL_KEY
